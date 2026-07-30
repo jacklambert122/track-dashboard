@@ -1,0 +1,42 @@
+[project]
+name = "track-dashboard"
+version = "0.1.0"
+description = "Modular Panel dashboard for point- and track-level analytics with Polars and hvPlot"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "holoviews>=1.20",
+  "hvplot>=0.12.2",
+  "panel>=1.5",
+  "param>=2.1",
+  "polars>=1.0",
+  "pandas>=2.2",
+  "pyarrow>=17",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.9",
+]
+
+[project.scripts]
+track-dashboard = "track_dashboard.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/track_dashboard"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
