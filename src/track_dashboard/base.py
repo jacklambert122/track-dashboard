@@ -20,7 +20,12 @@ class AnalysisComponent(param.Parameterized):
         self.data_model = data_model
         self.state.param.watch(
             self._data_changed,
-            ["analysis_level", "track_agg_methods", "data_revision"],
+            [
+                "analysis_level",
+                "track_agg_features",
+                "track_agg_methods_by_feature",
+                "data_revision",
+            ],
         )
 
     def _data_changed(self, _event=None) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import holoviews as hv
+import hvplot.polars  # noqa: F401
 import panel as pn
 import param
 
@@ -47,7 +48,8 @@ class ScatterPanel(AnalysisComponent):
         "y",
         "color",
         "state.analysis_level",
-        "state.track_agg_methods",
+        "state.track_agg_features",
+        "state.track_agg_methods_by_feature",
         "state.data_revision",
     )
     def plot(self):
@@ -63,7 +65,6 @@ class ScatterPanel(AnalysisComponent):
             "height": 475,
             "responsive": True,
             "tools": ["box_select", "lasso_select", "tap", "hover"],
-            "active_tools": ["box_select"],
             "hover_cols": [self.state.track_id_col],
         }
         if self.color in df.columns:
