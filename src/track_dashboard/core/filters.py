@@ -141,7 +141,7 @@ class FilterRow(param.Parameterized):
                 pn.widgets.Button.from_param(
                     self.param.remove,
                     name="Remove",
-                    button_type="danger",
+                    color="danger",
                     width=80,
                 ),
                 sizing_mode="stretch_width",
@@ -201,7 +201,7 @@ class FilterPanel(param.Parameterized):
     def view(self) -> pn.Column:
         return pn.Column(
             pn.widgets.Button.from_param(
-                self.param.add_filter, name="Add filter", button_type="primary"
+                self.param.add_filter, name="Add filter", color="primary"
             ),
             self.rows_container,
             sizing_mode="stretch_width",

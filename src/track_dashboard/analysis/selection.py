@@ -5,7 +5,7 @@ from pathlib import Path
 import panel as pn
 import param
 
-from .state import DashboardState
+from ..core.state import DashboardState
 
 
 class SelectionPanel(param.Parameterized):

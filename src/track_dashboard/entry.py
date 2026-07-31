@@ -6,7 +6,8 @@ from pathlib import Path
 import panel as pn
 import polars as pl
 
-from .app import DashboardApp
+from .analysis.app import DashboardApp
+from .confirmation.engine import MLModelSpec
 from .example_data import make_example_data
 
 SUPPORTED_INPUT_SUFFIXES = {".csv", ".parquet"}
@@ -45,9 +46,15 @@ class DashboardEntry:
         *,
         track_id_col: str = "track_id",
         excluded_track_metrics: set[str] | None = None,
+        label_col: str = "label",
+        matched_value: object = "matched",
+        feature_analysis_models: list[MLModelSpec] | None = None,
     ) -> None:
         self.track_id_col = track_id_col
         self.excluded_track_metrics = excluded_track_metrics or {"frame", "time"}
+        self.label_col = label_col
+        self.matched_value = matched_value
+        self.feature_analysis_models = feature_analysis_models or []
         self.file_input = pn.widgets.FileInput(
             name="Input data",
             accept=".csv,.parquet",
@@ -64,12 +71,15 @@ class DashboardEntry:
             self._set_data(load_input_data(path), f"Loaded {path.name}.")
 
     def _set_data(self, data: pl.DataFrame, message: str) -> None:
-        dashboard = DashboardApp(
+        self.dashboard = DashboardApp(
             data,
             track_id_col=self.track_id_col,
             excluded_track_metrics=self.excluded_track_metrics,
+            label_col=self.label_col,
+            matched_value=self.matched_value,
+            feature_analysis_models=self.feature_analysis_models,
         )
-        self.dashboard_container[:] = [dashboard.view()]
+        self.dashboard_container[:] = [self.dashboard.view()]
         self.status.object = message
         self.status.alert_type = "success"
         self.status.visible = True
@@ -97,4 +107,5 @@ class DashboardEntry:
             input_controls,
             self.dashboard_container,
             sizing_mode="stretch_both",
+            css_classes=["track-dashboard-root"],
         )

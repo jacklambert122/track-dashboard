@@ -4,7 +4,7 @@ import panel as pn
 import param
 import polars as pl
 
-from .base import AnalysisComponent
+from ..core.base import AnalysisComponent
 
 
 class DistributionPanel(AnalysisComponent):

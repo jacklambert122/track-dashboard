@@ -1,6 +1,6 @@
 import polars as pl
 
-from track_dashboard.aggregations import aggregate_tracks
+from track_dashboard.core.aggregations import aggregate_tracks
 
 
 def test_aggregate_tracks_generates_named_metrics():

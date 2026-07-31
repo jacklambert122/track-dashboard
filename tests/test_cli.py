@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import signal
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -9,8 +10,10 @@ import pytest
 from track_dashboard.cli import (
     ensure_port_available,
     listener_pids,
+    main,
     replace_default_server,
 )
+from track_dashboard.confirmation import MLModelSpec
 
 
 def test_ensure_port_available_accepts_unused_port() -> None:
@@ -48,3 +51,56 @@ def test_replace_default_server_terminates_existing_listener() -> None:
         replace_default_server("127.0.0.1", 5006)
 
     kill.assert_called_once_with(42, signal.SIGTERM)
+
+
+def test_main_registers_repeated_onnx_models_for_feature_analysis() -> None:
+    specs = [
+        MLModelSpec("quality", object(), ("snr", "residual")),
+        MLModelSpec("limb", object(), ("earth_limb_score",)),
+    ]
+    arguments = [
+        "track-dashboard",
+        "tracks.parquet",
+        "--label-col",
+        "truth",
+        "--positive-class",
+        "target",
+        "--onnx-model",
+        "quality",
+        "quality.onnx",
+        "snr",
+        "residual",
+        "--onnx-model",
+        "limb",
+        "limb.onnx",
+        "earth_limb_score",
+        "--port",
+        "5007",
+    ]
+    with (
+        patch.object(sys, "argv", arguments),
+        patch(
+            "track_dashboard.cli.build_onnx_model_specs",
+            return_value=specs,
+        ) as build_specs,
+        patch("track_dashboard.cli.DashboardEntry") as dashboard_entry,
+        patch("track_dashboard.cli.ensure_port_available"),
+        patch("track_dashboard.cli.pn.extension"),
+        patch("track_dashboard.cli.pn.serve"),
+    ):
+        dashboard_entry.return_value.view.return_value = object()
+        main()
+
+    build_specs.assert_called_once_with(
+        [
+            ["quality", "quality.onnx", "snr", "residual"],
+            ["limb", "limb.onnx", "earth_limb_score"],
+        ]
+    )
+    dashboard_entry.assert_called_once_with(
+        "tracks.parquet",
+        track_id_col="track_id",
+        label_col="truth",
+        matched_value="target",
+        feature_analysis_models=specs,
+    )

@@ -4,13 +4,16 @@ import panel as pn
 import param
 import polars as pl
 
-from .aggregations import AGGREGATIONS
-from .data_model import DataModel
+from ..confirmation.engine import MLModelSpec
+from ..core.aggregations import AGGREGATIONS
+from ..core.data_model import DataModel
+from ..core.filters import FilterPanel
+from ..core.state import DashboardState
+from ..core.theme import apply_dark_theme
 from .distributions import DistributionPanel
-from .filters import FilterPanel
+from .feature_analysis_panel import FeatureAnalysisPanel
 from .scatter import ScatterPanel
 from .selection import SelectionPanel
-from .state import DashboardState
 
 
 class DashboardApp(param.Parameterized):
@@ -24,8 +27,12 @@ class DashboardApp(param.Parameterized):
         *,
         track_id_col: str = "track_id",
         excluded_track_metrics: set[str] | None = None,
+        label_col: str = "label",
+        matched_value: str = "matched",
+        feature_analysis_models: list[MLModelSpec] | None = None,
         **params,
     ) -> None:
+        apply_dark_theme()
         super().__init__(**params)
         self.state = DashboardState(df, track_id_col=track_id_col)
         self.data_model = DataModel(
@@ -43,6 +50,13 @@ class DashboardApp(param.Parameterized):
         self.scatter = ScatterPanel(self.state, self.data_model)
         self.distributions = DistributionPanel(self.state, self.data_model)
         self.selection = SelectionPanel(self.state)
+        self.feature_analysis = FeatureAnalysisPanel(
+            self.state,
+            self.data_model,
+            label_col=label_col,
+            matched_value=matched_value,
+            ml_models=feature_analysis_models,
+        )
 
     @param.depends("state.analysis_level", "state.track_agg_features")
     def aggregation_controls(self):
@@ -104,8 +118,14 @@ class DashboardApp(param.Parameterized):
         tabs = pn.Tabs(
             ("Scatter", self.scatter.view()),
             ("Distributions", self.distributions.view()),
+            ("Feature analysis", self.feature_analysis.view()),
             ("Selected data", self.selection.view()),
             dynamic=True,
             sizing_mode="stretch_both",
         )
-        return pn.Row(sidebar, tabs, sizing_mode="stretch_both")
+        return pn.Row(
+            sidebar,
+            tabs,
+            sizing_mode="stretch_both",
+            css_classes=["track-dashboard-root"],
+        )

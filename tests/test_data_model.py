@@ -1,7 +1,7 @@
 import polars as pl
 
-from track_dashboard.data_model import DataModel
-from track_dashboard.state import DashboardState
+from track_dashboard.core.data_model import DataModel
+from track_dashboard.core.state import DashboardState
 
 
 def make_df() -> pl.DataFrame:

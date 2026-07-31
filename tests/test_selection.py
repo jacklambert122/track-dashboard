@@ -1,7 +1,7 @@
 import polars as pl
 
-from track_dashboard.selection import SelectionPanel
-from track_dashboard.state import INTERNAL_ROW_ID, DashboardState
+from track_dashboard.analysis.selection import SelectionPanel
+from track_dashboard.core.state import INTERNAL_ROW_ID, DashboardState
 
 
 def test_export_reports_path_and_hides_internal_row_id(tmp_path):

@@ -5,7 +5,7 @@ import hvplot.polars  # noqa: F401
 import panel as pn
 import param
 
-from .base import AnalysisComponent
+from ..core.base import AnalysisComponent
 
 
 class ScatterPanel(AnalysisComponent):

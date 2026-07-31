@@ -11,6 +11,7 @@ import time
 import panel as pn
 
 from .entry import DashboardEntry
+from .models.onnx import build_onnx_model_specs
 
 DEFAULT_PORT = 5006
 
@@ -88,16 +89,32 @@ def main() -> None:
         help="Optional .csv or .parquet input file; defaults to example data.",
     )
     parser.add_argument("--track-id-col", default="track_id")
+    parser.add_argument("--label-col", default="label")
+    parser.add_argument("--positive-class", default="matched")
+    parser.add_argument(
+        "--onnx-model",
+        action="append",
+        nargs="+",
+        metavar="VALUE",
+        help=(
+            "Register a feature-analysis ONNX model as "
+            "NAME FILE FEATURE [FEATURE ...]. Repeat for multiple models."
+        ),
+    )
     parser.add_argument("--address", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = parser.parse_args()
 
     try:
+        feature_analysis_models = build_onnx_model_specs(args.onnx_model)
         dashboard = DashboardEntry(
             args.input_file,
             track_id_col=args.track_id_col,
+            label_col=args.label_col,
+            matched_value=args.positive_class,
+            feature_analysis_models=feature_analysis_models,
         )
-    except (OSError, ValueError) as exc:
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
         parser.error(str(exc))
 
     if args.port == DEFAULT_PORT:
@@ -105,7 +122,12 @@ def main() -> None:
     else:
         ensure_port_available(args.address, args.port)
 
-    pn.extension("tabulator", sizing_mode="stretch_width")
+    pn.extension(
+        "tabulator",
+        sizing_mode="stretch_width",
+        design="material",
+        theme="dark",
+    )
     pn.serve(
         dashboard.view(),
         title="Track Dashboard",

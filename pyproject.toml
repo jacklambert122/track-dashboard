@@ -3,7 +3,7 @@ name = "track-dashboard"
 version = "0.1.0"
 description = "Modular Panel dashboard for point- and track-level analytics with Polars and hvPlot"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.12"
 dependencies = [
   "holoviews>=1.20",
   "hvplot>=0.12.2",
@@ -12,6 +12,13 @@ dependencies = [
   "polars>=1.0",
   "pandas>=2.2",
   "pyarrow>=17",
+  "numpy>=1.26,<1.27",
+  "numba>=0.59,<0.60",
+  "llvmlite>=0.42,<0.43",
+  "onnx>=1.17",
+  "onnxruntime>=1.20",
+  "scikit-learn>=1.5",
+  "shap>=0.46,<0.47",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +29,7 @@ dev = [
 
 [project.scripts]
 track-dashboard = "track_dashboard.cli:main"
+track-confirmation-dashboard = "track_dashboard.confirmation.cli:main"
 
 [build-system]
 requires = ["hatchling>=1.25"]

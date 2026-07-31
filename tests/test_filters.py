@@ -1,7 +1,7 @@
 import polars as pl
 
-from track_dashboard.filters import FilterPanel, FilterRow, filter_feature_types
-from track_dashboard.state import DashboardState
+from track_dashboard.core.filters import FilterPanel, FilterRow, filter_feature_types
+from track_dashboard.core.state import DashboardState
 
 
 def make_state() -> DashboardState:

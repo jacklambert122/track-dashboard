@@ -1,14 +1,21 @@
 """Modular point- and track-analysis dashboard."""
 
-from .app import DashboardApp
-from .data_model import DataModel
+from .analysis.app import DashboardApp
+from .confirmation.dashboard import TrackConfirmationDashboard
+from .confirmation.engine import MLConfirmationPath, MLModelSpec
+from .core.data_model import DataModel
+from .core.state import DashboardState
 from .entry import DashboardEntry, load_input_data
-from .state import DashboardState
+from .models.onnx import ONNXProbabilityModel
 
 __all__ = [
     "DashboardApp",
     "DashboardEntry",
     "DashboardState",
     "DataModel",
+    "MLConfirmationPath",
+    "MLModelSpec",
+    "ONNXProbabilityModel",
+    "TrackConfirmationDashboard",
     "load_input_data",
 ]
