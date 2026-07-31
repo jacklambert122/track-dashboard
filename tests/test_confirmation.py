@@ -102,6 +102,24 @@ def test_comparison_calculates_timing_label_impact_and_false_alarms():
     assert false_path["confirmed_tracks"] == 1
 
 
+def test_same_named_range_path_overrides_candidate_rule():
+    comparison = evaluate_comparison(
+        make_data(),
+        make_config(),
+        rules=[RangeRule("default_snr", "snr", minimum=11.0)],
+    )
+
+    track_one = comparison.first_times.filter(pl.col("track_id") == 1).row(
+        0, named=True
+    )
+    assert track_one["default_first_confirmation_time"] == 1.0
+    assert track_one["candidate_first_confirmation_time"] is None
+    assert comparison.candidate_path_columns == ("default_snr",)
+    assert "default_snr" in comparison.path_summary.filter(
+        pl.col("logic") == "experimental"
+    ).get_column("confirmation_path").to_list()
+
+
 def test_custom_python_evaluator_and_explicit_paths_are_supported():
     def current_confirmation(_config, data):
         return pl.DataFrame(

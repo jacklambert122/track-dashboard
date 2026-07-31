@@ -171,13 +171,14 @@ def analyze_features(
     shap_explainer: str = "Auto",
     shap_values_callback: (
         Callable[
-            [pl.DataFrame, list[str], np.ndarray, np.ndarray],
+            [pl.DataFrame, list[str], np.ndarray, np.ndarray, pl.DataFrame],
             None,
         ]
         | None
     ) = None,
     sample_size: int = 500,
     seed: int = 7,
+    group_col: str | None = None,
 ) -> pl.DataFrame:
     """Return long-form feature importance statistics for a binary label."""
     selected_features = list(dict.fromkeys(features))
@@ -195,11 +196,30 @@ def analyze_features(
     if data.is_empty():
         raise ValueError("No measurements remain after filtering.")
 
-    sample = (
-        data.sample(n=sample_size, seed=seed, shuffle=True)
-        if data.height > sample_size
-        else data
-    )
+    if data.height > sample_size and group_col in data.columns:
+        group_sizes = dict(
+            data.group_by(group_col)
+            .len()
+            .iter_rows()
+        )
+        selected_groups = []
+        selected_rows = 0
+        for group in (
+            data.get_column(group_col)
+            .unique(maintain_order=True)
+            .shuffle(seed=seed)
+        ):
+            selected_groups.append(group)
+            selected_rows += group_sizes[group]
+            if selected_rows >= sample_size:
+                break
+        sample = data.filter(pl.col(group_col).is_in(selected_groups))
+    else:
+        sample = (
+            data.sample(n=sample_size, seed=seed, shuffle=True)
+            if data.height > sample_size
+            else data
+        )
     target = (sample.get_column(label_col) == matched_value).cast(pl.Int8)
     if target.n_unique() < 2:
         raise ValueError(
@@ -265,6 +285,7 @@ def analyze_features(
                     model_features,
                     explainer_type=shap_explainer,
                     values_callback=shap_values_callback,
+                    row_context=sample,
                 )
             )
 
@@ -518,11 +539,12 @@ def _shap_rows(
     explainer_type: str,
     values_callback: (
         Callable[
-            [pl.DataFrame, list[str], np.ndarray, np.ndarray],
+            [pl.DataFrame, list[str], np.ndarray, np.ndarray, pl.DataFrame],
             None,
         ]
         | None
     ),
+    row_context: pl.DataFrame,
 ) -> list[dict[str, str | float]]:
     try:
         import shap
@@ -596,6 +618,7 @@ def _shap_rows(
             selected_features,
             values[:, selected_indices],
             base_values,
+            row_context,
         )
     mean_absolute = np.abs(values).mean(axis=0)
     scores = dict(zip(model.features, mean_absolute, strict=True))

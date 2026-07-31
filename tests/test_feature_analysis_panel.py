@@ -120,15 +120,21 @@ def test_shap_explainer_selector_only_appears_for_shap():
 
     panel.methods = ["Mutual information"]
     assert isinstance(panel.shap_options(), pn.Spacer)
+    assert isinstance(panel.model_options(), pn.Spacer)
 
     panel.methods = ["SHAP"]
     assert isinstance(panel.shap_options(), pn.widgets.Select)
+    assert isinstance(panel.model_options(), pn.Column)
     assert panel.param.shap_explainer.objects == [
         "Auto",
         "Tree",
         "Linear",
         "Permutation",
     ]
+
+    panel.methods = ["Permutation importance"]
+    assert isinstance(panel.shap_options(), pn.Spacer)
+    assert isinstance(panel.model_options(), pn.Column)
 
 
 def test_shap_analysis_creates_beeswarm_values():
@@ -148,7 +154,34 @@ def test_shap_analysis_creates_beeswarm_values():
     assert panel._shap_beeswarm() is not None
     assert panel._shap_importance_bar() is not None
     assert len(panel._shap_base_values) == 24
-    assert panel.shap_waterfall() is not None
+    tracks = panel.param.shap_waterfall_track.objects
+    assert len(tracks) == 6
+    panel.shap_waterfall_track = tracks[1]
+    expected_row = (
+        panel._shap_row_context.filter(
+            pl.col(panel.state.track_id_col) == tracks[1]
+        )
+        .get_column("row_index")
+        .first()
+    )
+    assert panel.shap_waterfall_row == expected_row
+    panel.shap_waterfall_track = tracks[-1]
+    selected_context = panel._shap_row_context.filter(
+        pl.col(panel.state.track_id_col) == tracks[-1]
+    )
+    assert selected_context.height == 4
+    assert panel.label_column in selected_context.columns
+    selected_range = panel._shap_force_range(
+        selected_context.get_column("row_index").to_list()
+    )
+    global_range = panel._shap_force_range()
+    assert selected_range[0] >= global_range[0]
+    assert selected_range[1] <= global_range[1]
+    force_view = panel.shap_waterfall()
+    assert len(force_view.select(pn.Card)) == 4
+    assert all(
+        "label=" in card.title for card in force_view.select(pn.Card)
+    )
 
 
 def test_shap_beeswarm_offsets_show_x_density():

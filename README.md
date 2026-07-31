@@ -14,6 +14,17 @@ Filters adapt to the selected feature type: numeric features use minimum and
 maximum inputs, while string, boolean, categorical, and enum features use a
 dropdown for selecting one or more values.
 
+## Contents
+
+- [Installation](#installation)
+- [Run the analysis dashboard](#run-the-analysis-dashboard)
+- [Analysis features](#analysis-features)
+- [Track confirmation dashboard](#track-confirmation-dashboard)
+- [Development](#development)
+
+<details>
+<summary><strong>Package organization and architecture</strong></summary>
+
 ## Package organization
 
 Implementation modules are grouped by responsibility:
@@ -48,7 +59,9 @@ DashboardApp
 └── SelectionPanel        selected rows and export
 ```
 
-## Install with uv
+</details>
+
+## Installation
 
 The project targets Python 3.11 and pins the SHAP/Numba/llvmlite stack to
 versions with Python 3.11 wheels.
@@ -57,7 +70,7 @@ versions with Python 3.11 wheels.
 uv sync --extra dev
 ```
 
-## Run
+## Run the analysis dashboard
 
 ```bash
 uv run panel serve examples/app.py --show --autoreload
@@ -93,14 +106,9 @@ uv run track-dashboard --port 5007
 For safety, a listener on a custom port is not stopped automatically; the
 command exits with a clear error instead.
 
-## Test
+## Analysis features
 
-```bash
-uv run pytest
-uv run ruff check .
-```
-
-## Track-level metrics
+### Track-level metrics
 
 When `Track` analysis is selected, aggregation controls appear. Choosing methods
 such as `mean`, `max`, and `std` creates columns such as:
@@ -122,13 +130,13 @@ for the current analysis.
 The scatter and distribution components continue to operate on ordinary feature
 names; only the active dataframe and selector options change.
 
-## Distributions
+### Distributions
 
 The distributions tab shows a histogram and ECDF together for the selected
 feature. Use its `Selected data` sub-tab to inspect the points or tracks selected
 in the scatter plot with the same distribution controls.
 
-## Feature analysis
+### Feature analysis
 
 The main analysis dashboard's **Feature analysis** tab evaluates selected
 numeric features against a selectable binary label column and positive class.
@@ -151,6 +159,9 @@ Choose any subset of available features and one or more methods:
   after shuffling each included model feature.
 - **SHAP** reports mean absolute SHAP values for included features used by a
   registered model.
+
+<details>
+<summary><strong>Model choices, SHAP explainers, and provided-model setup</strong></summary>
 
 For SHAP and permutation importance, choose **Build default model** and select
 logistic regression, random forest, or gradient boosting. The dashboard trains
@@ -182,10 +193,16 @@ position is its SHAP impact, vertical position is the feature, and color
 represents the feature's low-to-high value within the analyzed sample. Points
 with nearby SHAP values stack symmetrically in the y direction, so thicker
 sections of each feature row indicate greater local density along the x axis.
-Use the **Explained row** slider to inspect a force-style plot for an individual
-sample. It starts at the SHAP baseline, shows red features pushing the output
-higher and blue features pushing it lower, and marks the row's final model
-prediction on the same horizontal output axis.
+Use the **Explained track** selector to inspect a force-style plot for a track.
+In Track analysis mode, the explanation corresponds to that track's aggregated
+model-input row. In Point mode, every analyzed measurement from the selected
+track is displayed as an individual force row. Its y-axis entry includes the
+measurement time and selected label, and its prediction marker is color-coded
+by that label. SHAP sampling keeps complete tracks together, so it never shows
+only part of a sampled track. Each point gets a separate, independently scaled
+force panel with direct feature/contribution labels and hover details. Red
+features push the output higher, blue features push it lower, and the panel
+header reports the point time, label, baseline, and final prediction.
 
 Alternatively, choose **Use provided model** after registering one when creating
 `DashboardApp`:
@@ -230,7 +247,9 @@ representing the selected positive label class. Mutual-information scores
 always measure each feature directly against that same selected label and do
 not automatically display the correlation matrix.
 
-## Label and export selected data
+</details>
+
+### Label and export selected data
 
 The selected-data tab can add or update a string label column for the current
 selection. Point-mode labels apply to the exact selected rows; track-mode labels
@@ -240,7 +259,7 @@ become available in scatter color and distribution grouping controls.
 CSV and Parquet exports include the applied labels. After an export, the
 dashboard displays the complete path of the saved file.
 
-## Customize for your data
+### Customize for your data
 
 Replace `make_example_data()` in `src/track_dashboard/example_data.py`, or create
 `DashboardApp(your_polars_dataframe, track_id_col="track_id")` in your own Panel
@@ -272,6 +291,9 @@ payload["dynamic_specific"]["track_qa_config"]
 The input dataframe must contain track ID, time, and matched/unmatched label
 columns. Their defaults are `track_id`, `time`, and `label`; CLI flags can
 change all three.
+
+<details>
+<summary><strong>Existing Python confirmation logic and rule behavior</strong></summary>
 
 ### Existing Python confirmation logic
 
@@ -308,19 +330,35 @@ as confirmed, even when a later point no longer satisfies the triggering rule.
 Ranges within one experimental path are combined with AND, while separate paths
 are combined with OR.
 
-The control panel includes a multi-select for enabling any subset of the
-existing paths in the candidate. The baseline always retains the original
-default paths, so disabling a path can identify tracks lost by the candidate.
+The control panel has independent multi-selects for the loaded paths enabled in
+the Default baseline and in the Candidate. Path definitions still come from the
+configuration; the selectors only control which loaded paths participate in
+each side of the comparison. Set `default_enabled_paths` or `enabled_paths` in
+`track_qa_config` to initialize the Default or Candidate selection respectively.
+When these fields are omitted, Default enables every loaded path and Candidate
+starts with the same selection. Disabling a Candidate path can identify tracks
+lost relative to Default, while disabling a Default path supports alternate
+baseline comparisons.
 Add range rows under the same experimental path name to build an AND path, or
 enter additional path names to evaluate multiple new OR paths simultaneously.
+Using the name of a loaded range path creates a Candidate override: only the
+specified feature range is replaced, the path's other configured ranges are
+inherited, and the Overview reports the boundary change (for example,
+`min: 20 → 25`) instead of treating the path as newly added.
 Downloaded candidate configs preserve both the selected defaults in
-`enabled_paths` and all proposed `experimental_paths`.
+`default_enabled_paths`, the Candidate selection in `enabled_paths`, and all
+proposed `experimental_paths`.
 
 The same type-aware filters as the analysis dashboard are available in the
 confirmation sidebar. Numeric features use editable ranges, while string,
 boolean, categorical, and enum features use value dropdowns. Filters are
 applied before default and experimental confirmation, and every timing plot,
 summary table, and false-alarm metric recomputes from the filtered population.
+
+</details>
+
+<details>
+<summary><strong>Register ML confirmation paths from Python</strong></summary>
 
 ### ML confirmation paths
 
@@ -363,6 +401,11 @@ Candidate JSON records the model name, features, class index, threshold, and
 path name under `ml_confirmation_paths`. Model binaries are intentionally not
 serialized; reload the config with a trusted model registered under the same
 name.
+
+</details>
+
+<details>
+<summary><strong>Add ONNX models from the command line</strong></summary>
 
 ### Add ONNX models from the command line
 
@@ -409,6 +452,8 @@ For models requiring explicit input or output tensor names, register
 `ONNXProbabilityModel(path, input_name=..., output_name=...)` from Python rather
 than through the shorthand CLI option.
 
+</details>
+
 ### Comparison metrics
 
 The dashboard reports:
@@ -434,6 +479,9 @@ table.
 Plots and tables carry a `confirmation_logic` value of `Default` or `Candidate`,
 and a selectable label column—such as matched/unmatched—is included in hover
 details and displayed table rows.
+
+<details>
+<summary><strong>Example default ONNX confirmation model and config</strong></summary>
 
 ### Example provided default ML confirmation model
 
@@ -592,3 +640,14 @@ registered by `--onnx-model`.
 
 The download button saves the complete JSON payload with the proposed paths at
 `dynamic_specific.track_qa_config.experimental_paths`.
+
+</details>
+
+## Development
+
+Run the test and lint suites before submitting changes:
+
+```bash
+uv run pytest
+uv run ruff check .
+```

@@ -164,6 +164,7 @@ def candidate_config(
     rules: Iterable[RangeRule],
     *,
     enabled_default_paths: Iterable[str] | None = None,
+    baseline_default_paths: Iterable[str] | None = None,
     ml_paths: Iterable[MLConfirmationPath] = (),
 ) -> dict[str, Any]:
     """Return a full config payload containing the experimental paths."""
@@ -175,6 +176,8 @@ def candidate_config(
     ]
     if enabled_default_paths is not None:
         config["enabled_paths"] = list(enabled_default_paths)
+    if baseline_default_paths is not None:
+        config["default_enabled_paths"] = list(baseline_default_paths)
     return updated
 
 
@@ -207,6 +210,7 @@ def evaluate_comparison(
     default_ml_paths: Iterable[MLConfirmationPath] = (),
     evaluator: ConfirmationEvaluator = generic_confirmation_evaluator,
     default_path_columns: Iterable[str] | None = None,
+    baseline_default_path_columns: Iterable[str] | None = None,
     candidate_default_path_columns: Iterable[str] | None = None,
     track_id_col: str = "track_id",
     time_col: str = "time",
@@ -214,6 +218,7 @@ def evaluate_comparison(
     matched_value: str = "matched",
 ) -> ConfirmationComparison:
     """Compare current Python confirmation with added range-based paths."""
+    rules = list(rules)
     ml_paths = list(ml_paths)
     default_ml_paths = list(default_ml_paths)
     required = {track_id_col, time_col, label_col}
@@ -300,6 +305,19 @@ def evaluate_comparison(
             "No default confirmation path columns were detected. Return new path "
             "columns from the evaluator or pass default_path_columns."
         )
+    baseline_default_paths = (
+        default_paths
+        if baseline_default_path_columns is None
+        else list(baseline_default_path_columns)
+    )
+    missing_baseline_paths = sorted(
+        set(baseline_default_paths) - set(default_paths)
+    )
+    if missing_baseline_paths:
+        raise ValueError(
+            "Enabled baseline paths are not loaded default paths: "
+            f"{missing_baseline_paths}"
+        )
     candidate_default_paths = (
         default_paths
         if candidate_default_path_columns is None
@@ -352,34 +370,67 @@ def evaluate_comparison(
         .sort(row_order_col)
         .drop(row_order_col)
     )
-    experimental_paths = _evaluate_range_rules(evaluated, rules)
-    if experimental_paths:
-        collisions = sorted(
-            {
-                expression.meta.output_name()
-                for expression in experimental_paths
-                if expression.meta.output_name() in evaluated.columns
-            }
+    proposed_range_paths = rules_to_paths(rules)
+    range_path_names = [path["name"] for path in proposed_range_paths]
+    configured_ranges = {
+        path.get("name"): path.get("ranges", {})
+        for path in track_qa_config(config_payload).get(
+            "paths",
+            track_qa_config(config_payload).get("confirmation_paths", []),
         )
-        if collisions:
-            raise ValueError(
-                f"Experimental path names must be new columns: {collisions}"
+        if isinstance(path, dict)
+    }
+    proposed_features = {(rule.path, rule.feature) for rule in rules}
+    inherited_rules = [
+        RangeRule(
+            path=path_name,
+            feature=feature,
+            minimum=bounds.get("min"),
+            maximum=bounds.get("max"),
+        )
+        for path_name in range_path_names
+        for feature, bounds in configured_ranges.get(path_name, {}).items()
+        if (path_name, feature) not in proposed_features
+        and isinstance(bounds, dict)
+        and (bounds.get("min") is not None or bounds.get("max") is not None)
+    ]
+    range_column_names = {
+        path_name: (
+            _temporary_column_name(
+                [*evaluated.columns, *range_path_names],
+                f"__candidate_{path_name}",
             )
+            if path_name in evaluated.columns
+            else path_name
+        )
+        for path_name in range_path_names
+    }
+    experimental_paths = _evaluate_range_rules(
+        evaluated,
+        [*inherited_rules, *rules],
+        output_names=range_column_names,
+    )
+    if experimental_paths:
         evaluated = evaluated.with_columns(experimental_paths)
 
-    range_path_names = [
-        expression.meta.output_name() for expression in experimental_paths
-    ]
     range_ml_collisions = sorted(set(range_path_names) & set(ml_path_names))
     if range_ml_collisions:
         raise ValueError(
             "Range and ML path names must be unique: "
             f"{range_ml_collisions}"
         )
-    candidate_paths = [*range_path_names, *ml_path_names]
+    candidate_default_paths = [
+        path for path in candidate_default_paths if path not in range_path_names
+    ]
+    candidate_path_columns = [
+        *(range_column_names[path] for path in range_path_names),
+        *ml_path_names,
+    ]
     default_triggered = (
-        pl.any_horizontal([pl.col(column) == 1 for column in default_paths])
-        if default_paths
+        pl.any_horizontal(
+            [pl.col(column) == 1 for column in baseline_default_paths]
+        )
+        if baseline_default_paths
         else pl.lit(False)
     )
     candidate_default_triggered = (
@@ -390,8 +441,10 @@ def evaluate_comparison(
         else pl.lit(False)
     )
     experimental_triggered = (
-        pl.any_horizontal([pl.col(column) == 1 for column in candidate_paths])
-        if candidate_paths
+        pl.any_horizontal(
+            [pl.col(column) == 1 for column in candidate_path_columns]
+        )
+        if candidate_path_columns
         else pl.lit(False)
     )
     evaluated = evaluated.with_columns(
@@ -444,8 +497,11 @@ def evaluate_comparison(
     )
     path_summary = _path_summary(
         evaluated,
-        default_paths=default_paths,
-        experimental_paths=candidate_paths,
+        default_paths=((path, path) for path in baseline_default_paths),
+        experimental_paths=[
+            *((path, range_column_names[path]) for path in range_path_names),
+            *((path, path) for path in ml_path_names),
+        ],
         track_id_col=track_id_col,
         label_col=label_col,
         matched_value=matched_value,
@@ -464,7 +520,7 @@ def evaluate_comparison(
         path_summary=path_summary,
         metrics=metrics,
         default_path_columns=tuple(default_paths),
-        candidate_path_columns=tuple(candidate_paths),
+        candidate_path_columns=tuple([*range_path_names, *ml_path_names]),
     )
 
 
@@ -488,11 +544,14 @@ def _range_expression(
 def _evaluate_range_rules(
     data: pl.DataFrame,
     rules: Iterable[RangeRule],
+    *,
+    output_names: dict[str, str] | None = None,
 ) -> list[pl.Expr]:
     expressions = []
     for path in rules_to_paths(rules):
         expression = _range_expression(data, path["ranges"])
-        expressions.append(expression.cast(pl.Int8).alias(path["name"]))
+        output_name = (output_names or {}).get(path["name"], path["name"])
+        expressions.append(expression.cast(pl.Int8).alias(output_name))
     return expressions
 
 
@@ -599,19 +658,19 @@ def _headline_metrics(
 def _path_summary(
     data: pl.DataFrame,
     *,
-    default_paths: Iterable[str],
-    experimental_paths: Iterable[str],
+    default_paths: Iterable[tuple[str, str]],
+    experimental_paths: Iterable[tuple[str, str]],
     track_id_col: str,
     label_col: str,
     matched_value: str,
 ) -> pl.DataFrame:
     rows: list[dict[str, str | int]] = []
     paths = [
-        *(("default", path) for path in default_paths),
-        *(("experimental", path) for path in experimental_paths),
+        *(("default", name, column) for name, column in default_paths),
+        *(("experimental", name, column) for name, column in experimental_paths),
     ]
-    for logic, path in paths:
-        path_hits = data.filter(pl.col(path) == 1)
+    for logic, path, column in paths:
+        path_hits = data.filter(pl.col(column) == 1)
         for cohort, cohort_filter in (
             ("matched", pl.col(label_col) == matched_value),
             ("false", pl.col(label_col) != matched_value),

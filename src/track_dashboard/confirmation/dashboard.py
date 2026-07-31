@@ -35,6 +35,7 @@ class TrackConfirmationDashboard(param.Parameterized):
     """Interactive comparison of default and experimental confirmation paths."""
 
     rule_revision = param.Integer(default=0, precedence=-1)
+    enabled_baseline_paths = param.ListSelector(default=[], objects=[])
     enabled_default_paths = param.ListSelector(default=[], objects=[])
     path_name = param.String(default="experimental_path")
     feature = param.Selector(default=None, allow_None=True)
@@ -143,18 +144,35 @@ class TrackConfirmationDashboard(param.Parameterized):
         )
         available_paths = list(initial_comparison.default_path_columns)
         self.available_default_paths = available_paths
+        configured_baseline_paths = confirmation_config.get(
+            "default_enabled_paths"
+        )
+        baseline_paths = (
+            available_paths
+            if configured_baseline_paths is None
+            else [
+                path
+                for path in configured_baseline_paths
+                if path in available_paths
+            ]
+        )
         configured_paths = track_qa_config(self.config_payload).get("enabled_paths")
         enabled_paths = (
-            available_paths
+            baseline_paths
             if configured_paths is None
             else [
                 path for path in configured_paths if path in available_paths
             ]
         )
+        self.param.enabled_baseline_paths.objects = available_paths
+        self.enabled_baseline_paths = baseline_paths
         self.param.enabled_default_paths.objects = available_paths
         self.enabled_default_paths = enabled_paths
         self._cached_revision = (
-            self.rule_revision if enabled_paths == available_paths else -1
+            self.rule_revision
+            if enabled_paths == available_paths
+            and baseline_paths == available_paths
+            else -1
         )
         self._cached_comparison: ConfirmationComparison | None = (
             initial_comparison if enabled_paths == available_paths else None
@@ -221,6 +239,7 @@ class TrackConfirmationDashboard(param.Parameterized):
         self.param.watch(self._add_ml_path, "add_ml_path")
         self.param.watch(self._remove_ml_paths, "remove_ml_paths")
         self.param.watch(self._default_paths_changed, "enabled_default_paths")
+        self.param.watch(self._default_paths_changed, "enabled_baseline_paths")
         self.filter_state.param.watch(self._filters_changed, "data_revision")
 
     @staticmethod
@@ -272,6 +291,7 @@ class TrackConfirmationDashboard(param.Parameterized):
                 default_ml_paths=self.default_ml_paths,
                 evaluator=self.evaluator,
                 default_path_columns=self.available_default_paths,
+                baseline_default_path_columns=self.enabled_baseline_paths,
                 candidate_default_path_columns=self.enabled_default_paths,
                 track_id_col=self.track_id_col,
                 time_col=self.time_col,
@@ -304,12 +324,25 @@ class TrackConfirmationDashboard(param.Parameterized):
         except (RuntimeError, TypeError, ValueError) as exc:
             self._set_status(str(exc), "danger")
             return
+        replaced = any(
+            existing.path == rule.path and existing.feature == rule.feature
+            for existing in self.rules
+        )
+        self.rules = [
+            existing
+            for existing in self.rules
+            if not (
+                existing.path == rule.path
+                and existing.feature == rule.feature
+            )
+        ]
         self.rules.append(rule)
         self.minimum = None
         self.maximum = None
         self._rules_changed()
         self._set_status(
-            f"Added range for `{rule.feature}` to `{rule.path}`.",
+            f"{'Updated' if replaced else 'Added'} range for "
+            f"`{rule.feature}` in `{rule.path}`.",
             "success",
         )
 
@@ -338,7 +371,7 @@ class TrackConfirmationDashboard(param.Parameterized):
             return
         path_name = self.ml_path_name.strip()
         existing_paths = {
-            *self.enabled_default_paths,
+            *self.available_default_paths,
             *(rule.path for rule in self.rules),
             *(path.path for path in self.ml_paths),
         }
@@ -429,6 +462,229 @@ class TrackConfirmationDashboard(param.Parameterized):
             },
         )
 
+    @staticmethod
+    def _path_frame(rows: list[dict[str, Any]]) -> pl.DataFrame:
+        columns = [
+            "path",
+            "enabled",
+            "kind",
+            "feature",
+            "minimum",
+            "maximum",
+            "model",
+            "threshold",
+            "change",
+            "difference",
+        ]
+        if not rows:
+            return pl.DataFrame({column: [] for column in columns})
+        return pl.DataFrame(rows).select(columns)
+
+    def _default_path_rows(self) -> list[dict[str, Any]]:
+        config = track_qa_config(self.config_payload)
+        configured_paths = {
+            path.get("name"): path
+            for path in config.get("paths", config.get("confirmation_paths", []))
+            if isinstance(path, dict) and path.get("name")
+        }
+        configured_ml = {path.path: path for path in self.default_ml_paths}
+        rows: list[dict[str, Any]] = []
+        for path_name in self.available_default_paths:
+            if path_name in configured_ml:
+                path = configured_ml[path_name]
+                rows.append(
+                    {
+                        "path": path_name,
+                        "enabled": path_name in self.enabled_baseline_paths,
+                        "kind": "ML",
+                        "feature": ", ".join(path.model.features),
+                        "minimum": None,
+                        "maximum": None,
+                        "model": path.model.name,
+                        "threshold": path.threshold,
+                        "change": "Unchanged",
+                        "difference": "",
+                    }
+                )
+                continue
+            path_config = configured_paths.get(path_name)
+            ranges = path_config.get("ranges", {}) if path_config else {}
+            if ranges:
+                for feature, bounds in ranges.items():
+                    bounds = bounds if isinstance(bounds, dict) else {}
+                    rows.append(
+                        {
+                            "path": path_name,
+                            "enabled": path_name in self.enabled_baseline_paths,
+                            "kind": "Range",
+                            "feature": feature,
+                            "minimum": bounds.get("min"),
+                            "maximum": bounds.get("max"),
+                            "model": None,
+                            "threshold": None,
+                            "change": "Unchanged",
+                            "difference": "",
+                        }
+                    )
+            else:
+                rows.append(
+                    {
+                        "path": path_name,
+                        "enabled": path_name in self.enabled_baseline_paths,
+                        "kind": "Python evaluator",
+                        "feature": "Defined by evaluator",
+                        "minimum": None,
+                        "maximum": None,
+                        "model": None,
+                        "threshold": None,
+                        "change": "Unchanged",
+                        "difference": "",
+                    }
+                )
+        return rows
+
+    def _candidate_path_rows(self) -> list[dict[str, Any]]:
+        default_rows = self._default_path_rows()
+        override_features = {(rule.path, rule.feature) for rule in self.rules}
+        rows = [
+            {
+                **row,
+                "enabled": True,
+                "change": (
+                    "Unchanged"
+                    if row["path"] in self.enabled_baseline_paths
+                    else "Added"
+                ),
+            }
+            for row in default_rows
+            if row["path"] in self.enabled_default_paths
+            and (row["path"], row["feature"]) not in override_features
+        ]
+        for rule in self.rules:
+            previous = next(
+                (
+                    row
+                    for row in default_rows
+                    if row["path"] == rule.path
+                    and row["feature"] == rule.feature
+                ),
+                None,
+            )
+            differences = []
+            if previous is not None:
+                for label, old, new in (
+                    ("min", previous["minimum"], rule.minimum),
+                    ("max", previous["maximum"], rule.maximum),
+                ):
+                    if old != new:
+                        differences.append(f"{label}: {old} → {new}")
+            rows.append(
+                {
+                "path": rule.path,
+                "enabled": True,
+                "kind": "Range",
+                "feature": rule.feature,
+                "minimum": rule.minimum,
+                "maximum": rule.maximum,
+                "model": None,
+                "threshold": None,
+                "change": "Modified" if previous is not None else "Added",
+                "difference": "; ".join(differences),
+            }
+            )
+        rows.extend(
+            {
+                "path": path.path,
+                "enabled": True,
+                "kind": "ML",
+                "feature": ", ".join(path.model.features),
+                "minimum": None,
+                "maximum": None,
+                "model": path.model.name,
+                "threshold": path.threshold,
+                "change": "Added",
+                "difference": "",
+            }
+            for path in self.ml_paths
+        )
+        return rows
+
+    @param.depends("rule_revision")
+    def path_comparison_overview(self):
+        default_rows = self._default_path_rows()
+        candidate_rows = self._candidate_path_rows()
+        removed_rows = [
+            {**row, "change": "Removed", "difference": "path disabled"}
+            for row in default_rows
+            if row["path"] in self.enabled_baseline_paths
+            and row["path"] not in self.enabled_default_paths
+        ]
+        changed_rows = [
+            *removed_rows,
+            *(row for row in candidate_rows if row["change"] != "Unchanged"),
+        ]
+        added_paths = {
+            row["path"] for row in changed_rows if row["change"] == "Added"
+        }
+        removed_paths = {
+            row["path"] for row in changed_rows if row["change"] == "Removed"
+        }
+        modified_paths = {
+            row["path"] for row in changed_rows if row["change"] == "Modified"
+        }
+        change_message = (
+            f"**{len({row['path'] for row in changed_rows})} path(s) changed:** "
+            f"{len(added_paths)} added, {len(modified_paths)} modified, and "
+            f"{len(removed_paths)} removed."
+            if changed_rows
+            else "**No path changes.** Candidate currently matches the loaded default."
+        )
+
+        def table(rows: list[dict[str, Any]], *, height: int = 300):
+            return pn.widgets.Tabulator(
+                self._path_frame(rows).drop("change").to_pandas(),
+                pagination="local",
+                page_size=12,
+                height=height,
+                sizing_mode="stretch_width",
+                disabled=True,
+            )
+
+        changes = pn.widgets.Tabulator(
+            self._path_frame(changed_rows).to_pandas(),
+            pagination="local",
+            page_size=12,
+            height=260,
+            sizing_mode="stretch_width",
+            disabled=True,
+        )
+        return pn.Column(
+            pn.pane.Alert(
+                change_message,
+                alert_type="warning" if changed_rows else "success",
+                sizing_mode="stretch_width",
+            ),
+            pn.Row(
+                pn.Card(
+                    table(default_rows),
+                    title="Loaded default paths and rules",
+                    sizing_mode="stretch_width",
+                ),
+                pn.Card(
+                    table(candidate_rows),
+                    title="Current candidate paths and rules",
+                    sizing_mode="stretch_width",
+                ),
+                sizing_mode="stretch_width",
+            ),
+            pn.Card(
+                changes,
+                title="Changes from default to candidate",
+                sizing_mode="stretch_width",
+            ),
+            sizing_mode="stretch_width",
+        )
+
     def _set_status(self, message: str, status_type: str) -> None:
         self.status_message = message
         self.status_type = status_type
@@ -447,6 +703,7 @@ class TrackConfirmationDashboard(param.Parameterized):
             self.config_payload,
             self.rules,
             enabled_default_paths=self.enabled_default_paths,
+            baseline_default_paths=self.enabled_baseline_paths,
             ml_paths=self.ml_paths,
         )
         return BytesIO(json.dumps(payload, indent=2).encode())
@@ -454,9 +711,23 @@ class TrackConfirmationDashboard(param.Parameterized):
     def controls(self) -> pn.Column:
         rule_inputs = pn.Column(
             pn.widgets.MultiChoice.from_param(
-                self.param.enabled_default_paths,
+                self.param.enabled_baseline_paths,
                 name="Enabled default confirmation paths",
                 sizing_mode="stretch_width",
+            ),
+            pn.pane.Markdown(
+                "These loaded paths define the baseline used for the Default "
+                "statistics."
+            ),
+            pn.widgets.MultiChoice.from_param(
+                self.param.enabled_default_paths,
+                name="Default paths included in candidate",
+                sizing_mode="stretch_width",
+            ),
+            pn.pane.Markdown(
+                "Deselecting a loaded default path removes it from the "
+                "candidate only. Candidate selections are independent of the "
+                "Default selections above."
             ),
             pn.Card(
                 self.filters.view(),
@@ -609,23 +880,56 @@ class TrackConfirmationDashboard(param.Parameterized):
         )
 
     @param.depends("rule_revision")
-    def first_confirmation_plot(self):
-        first_times = self._comparison().first_times.filter(
-            pl.col("default_first_confirmation_time").is_not_null()
-            & pl.col("candidate_first_confirmation_time").is_not_null()
-        )
-        if first_times.is_empty():
-            return pn.pane.Markdown(
-                "No tracks are confirmed by both configurations."
+    def first_confirmation_summary(self):
+        first_times = self._comparison().first_times
+        frames = []
+        for logic, column in (
+            ("Default", "default_first_confirmation_time"),
+            ("Candidate", "candidate_first_confirmation_time"),
+        ):
+            timing = first_times.select(
+                self.label_col,
+                pl.col(column).alias("first_confirmation_time"),
+            ).drop_nulls("first_confirmation_time")
+            if timing.is_empty():
+                continue
+            frames.extend(
+                [
+                    timing.with_columns(
+                        pl.lit(logic).alias("logic"),
+                        pl.lit("Overall").alias("cohort"),
+                    ),
+                    timing.with_columns(
+                        pl.lit(logic).alias("logic"),
+                        pl.col(self.label_col).cast(pl.String).alias("cohort"),
+                    ),
+                ]
             )
-        return first_times.hvplot.scatter(
-            x="default_first_confirmation_time",
-            y="candidate_first_confirmation_time",
-            color=self.label_col,
-            hover_cols=[self.track_id_col],
-            height=430,
-            responsive=True,
-            title="First confirmation time: default vs candidate",
+        if not frames:
+            return pn.pane.Markdown("No confirmed tracks to summarize.")
+
+        summary = (
+            pl.concat(frames)
+            .group_by(["logic", "cohort"], maintain_order=True)
+            .agg(
+                pl.len().alias("confirmed_tracks"),
+                pl.col("first_confirmation_time").min().alias("minimum"),
+                pl.col("first_confirmation_time").quantile(0.25).alias("p25"),
+                pl.col("first_confirmation_time").median().alias("median"),
+                pl.col("first_confirmation_time").mean().alias("mean"),
+                pl.col("first_confirmation_time").quantile(0.75).alias("p75"),
+                pl.col("first_confirmation_time").quantile(0.90).alias("p90"),
+                pl.col("first_confirmation_time").max().alias("maximum"),
+            )
+            .sort(["cohort", "logic"])
+        )
+        return pn.widgets.Tabulator(
+            summary.to_pandas(),
+            pagination="local",
+            page_size=20,
+            height=300,
+            sizing_mode="stretch_width",
+            disabled=True,
         )
 
     @param.depends("rule_revision")
@@ -690,6 +994,11 @@ class TrackConfirmationDashboard(param.Parameterized):
     @param.depends("rule_revision")
     def first_confirmation_details(self):
         return pn.Column(
+            pn.Card(
+                self.first_confirmation_summary,
+                title="First confirmation time summary",
+                sizing_mode="stretch_width",
+            ),
             pn.Card(
                 self.first_confirmation_distributions,
                 title="First confirmation distributions",
@@ -944,7 +1253,7 @@ class TrackConfirmationDashboard(param.Parameterized):
                 "Overview",
                 pn.Column(
                     self.headline_metrics,
-                    self.first_confirmation_plot,
+                    self.path_comparison_overview,
                     sizing_mode="stretch_both",
                 ),
             ),

@@ -1,8 +1,12 @@
 {
-  "dynamic_specific": {
-    "track_qa_config": {
-      "models": {
-        "example_quality_model": {
+  "dynamic_specific": 
+  {
+    "track_qa_config": 
+    {
+      "models": 
+      {
+        "example_quality_model": 
+        {
           "type": "onnx",
           "file": "models/example_quality_model.onnx",
           "features": [
@@ -14,14 +18,16 @@
           "positive_class_index": 1
         }
       },
-      "default_ml_paths": [
+      "default_ml_paths": 
+      [
         {
           "name": "default_ml_quality_path",
           "model": "example_quality_model",
           "threshold": 0.55
         }
       ],
-      "paths": [
+      "paths": 
+      [
         {
           "name": "quality_path",
           "ranges": {

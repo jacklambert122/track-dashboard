@@ -68,6 +68,11 @@ class FeatureAnalysisPanel(AnalysisComponent):
         objects=["Auto", "Tree", "Linear", "Permutation"],
     )
     shap_waterfall_row = param.Integer(default=0, bounds=(0, 0))
+    shap_waterfall_track = param.Selector(
+        default=None,
+        objects=[],
+        allow_None=True,
+    )
     model = param.Selector(default=None, allow_None=True)
     sample_size = param.Integer(default=500, bounds=(20, 100_000))
     run_analysis = param.Event()
@@ -93,6 +98,7 @@ class FeatureAnalysisPanel(AnalysisComponent):
         self._correlation_matrix = self._empty_correlation_matrix()
         self._shap_values = self._empty_shap_values()
         self._shap_base_values: list[float] = []
+        self._shap_row_context = pl.DataFrame()
         super().__init__(*args, **kwargs)
         self.param.model.objects = [None, *self.model_registry]
         self.model = (
@@ -100,6 +106,7 @@ class FeatureAnalysisPanel(AnalysisComponent):
         )
         self.param.watch(self._run_analysis, "run_analysis")
         self.param.watch(self._label_changed, "label_column")
+        self.param.watch(self._shap_track_changed, "shap_waterfall_track")
         self.refresh_options()
 
     @staticmethod
@@ -193,6 +200,7 @@ class FeatureAnalysisPanel(AnalysisComponent):
         self._correlation_matrix = self._empty_correlation_matrix()
         self._shap_values = self._empty_shap_values()
         self._shap_base_values = []
+        self._shap_row_context = pl.DataFrame()
         self.message = "Dashboard data changed. Run feature analysis again."
         self.result_revision += 1
         super()._data_changed(event)
@@ -203,6 +211,7 @@ class FeatureAnalysisPanel(AnalysisComponent):
             selected_model = self._selected_model(analysis_data)
             self._shap_values = self._empty_shap_values()
             self._shap_base_values = []
+            self._shap_row_context = pl.DataFrame()
             self._result = analyze_features(
                 analysis_data,
                 features=self.features,
@@ -213,6 +222,7 @@ class FeatureAnalysisPanel(AnalysisComponent):
                 shap_explainer=self.shap_explainer,
                 shap_values_callback=self._capture_shap_values,
                 sample_size=self.sample_size,
+                group_col=self.state.track_id_col,
             )
             self._correlation_matrix = (
                 self._build_correlation_matrix(analysis_data)
@@ -224,6 +234,7 @@ class FeatureAnalysisPanel(AnalysisComponent):
             self._correlation_matrix = self._empty_correlation_matrix()
             self._shap_values = self._empty_shap_values()
             self._shap_base_values = []
+            self._shap_row_context = pl.DataFrame()
             self.message = str(exc)
             self.result_revision += 1
             return
@@ -239,6 +250,7 @@ class FeatureAnalysisPanel(AnalysisComponent):
         features: list[str],
         shap_values,
         base_values,
+        row_context: pl.DataFrame,
     ) -> None:
         rows = []
         for feature_index, feature in enumerate(features):
@@ -267,9 +279,41 @@ class FeatureAnalysisPanel(AnalysisComponent):
                 )
         self._shap_values = pl.DataFrame(rows)
         self._shap_base_values = [float(value) for value in base_values]
+        self._shap_row_context = row_context.with_row_index("row_index")
         maximum_row = max(0, len(self._shap_base_values) - 1)
         self.param.shap_waterfall_row.bounds = (0, maximum_row)
         self.shap_waterfall_row = min(self.shap_waterfall_row, maximum_row)
+        track_column = self.state.track_id_col
+        tracks = (
+            self._shap_row_context.get_column(track_column)
+            .unique(maintain_order=True)
+            .to_list()
+            if track_column in self._shap_row_context.columns
+            else []
+        )
+        current_track = self.shap_waterfall_track
+        self.param.shap_waterfall_track.objects = tracks
+        self.shap_waterfall_track = (
+            current_track
+            if current_track in tracks
+            else (tracks[0] if tracks else None)
+        )
+        self._shap_track_changed()
+
+    def _shap_track_changed(self, _event=None) -> None:
+        track_column = self.state.track_id_col
+        if (
+            self.shap_waterfall_track is None
+            or track_column not in self._shap_row_context.columns
+        ):
+            return
+        matching_rows = self._shap_row_context.filter(
+            pl.col(track_column) == self.shap_waterfall_track
+        )
+        if not matching_rows.is_empty():
+            self.shap_waterfall_row = int(
+                matching_rows.get_column("row_index").first()
+            )
 
     @staticmethod
     def _density_offsets(values: list[float]) -> list[float]:
@@ -435,10 +479,17 @@ class FeatureAnalysisPanel(AnalysisComponent):
             )
             outputs.append(
                 pn.Card(
-                    pn.widgets.IntSlider.from_param(
-                        self.param.shap_waterfall_row,
-                        name="Explained row",
+                    pn.widgets.Select.from_param(
+                        self.param.shap_waterfall_track,
+                        name="Explained track",
                         sizing_mode="stretch_width",
+                    ),
+                    pn.pane.Markdown(
+                        "The force plot explains the aggregated row for this "
+                        "track."
+                        if self.state.analysis_level == "Track"
+                        else "Point mode displays every analyzed measurement "
+                        "for the selected track."
                     ),
                     self.shap_waterfall,
                     title="SHAP force plot",
@@ -537,114 +588,407 @@ class FeatureAnalysisPanel(AnalysisComponent):
             line_width=1,
         )
 
-    @param.depends("shap_waterfall_row")
-    def shap_waterfall(self):
+    def _shap_force_range(
+        self,
+        row_indices: list[int] | None = None,
+    ) -> tuple[float, float]:
+        """Return a fitted output range for the selected SHAP rows."""
+        endpoints: list[float] = []
+        selected_rows = (
+            row_indices
+            if row_indices is not None
+            else list(range(len(self._shap_base_values)))
+        )
+        for row_index in selected_rows:
+            baseline = self._shap_base_values[row_index]
+            contributions = (
+                self._shap_values.filter(pl.col("row_index") == row_index)
+                .with_columns(pl.col("shap_value").abs().alias("__absolute"))
+                .sort("__absolute", descending=True)
+                .get_column("shap_value")
+                .to_list()
+            )
+            cumulative = baseline
+            endpoints.append(cumulative)
+            for contribution in contributions:
+                cumulative += contribution
+                endpoints.append(cumulative)
+        if not endpoints:
+            return (-1.0, 1.0)
+        lower = min(endpoints)
+        upper = max(endpoints)
+        span = upper - lower
+        padding = max(span * 0.05, 0.01)
+        return lower - padding, upper + padding
+
+    def _shap_force_overview(self):
         if self._shap_values.is_empty() or not self._shap_base_values:
             return pn.pane.Markdown("Run SHAP to create a waterfall plot.")
-        row_index = self.shap_waterfall_row
-        row_values = (
-            self._shap_values.filter(pl.col("row_index") == row_index)
-            .with_columns(pl.col("shap_value").abs().alias("__absolute"))
-            .sort("__absolute", descending=True)
+        track_column = self.state.track_id_col
+        selected_context = self._shap_row_context.filter(
+            pl.col(track_column) == self.shap_waterfall_track
         )
-        baseline = self._shap_base_values[row_index]
-        output = baseline + row_values.get_column("shap_value").sum()
-        cumulative = baseline
+        if selected_context.is_empty():
+            selected_context = self._shap_row_context.filter(
+                pl.col("row_index") == self.shap_waterfall_row
+            )
+        selected_context = selected_context.sort("row_index")
+        row_indices = selected_context.get_column("row_index").to_list()
+        row_count = len(row_indices)
         polygons = []
         labels = []
-        for row in row_values.iter_rows(named=True):
-            contribution = row["shap_value"]
-            next_value = cumulative + contribution
-            direction = "Increases output" if contribution >= 0 else "Decreases output"
-            arrow_width = min(
-                abs(contribution) * 0.3,
-                max(abs(output - baseline), 0.01) * 0.04,
+        baseline_segments = []
+        output_points = []
+        y_ticks = []
+        label_column = self.label_column
+        time_column = next(
+            (
+                column
+                for column in ("time", "timestamp")
+                if column in selected_context.columns
+            ),
+            None,
+        )
+        for point_index, context in enumerate(
+            selected_context.iter_rows(named=True)
+        ):
+            row_index = context["row_index"]
+            center_y = row_count - point_index - 1
+            point_label = (
+                str(context.get(label_column))
+                if label_column in selected_context.columns
+                else "unlabeled"
             )
-            if contribution >= 0:
-                coordinates = [
-                    (cumulative, -0.28),
-                    (next_value - arrow_width, -0.28),
-                    (next_value, 0.0),
-                    (next_value - arrow_width, 0.28),
-                    (cumulative, 0.28),
-                ]
-            else:
-                coordinates = [
-                    (cumulative, -0.28),
-                    (next_value + arrow_width, -0.28),
-                    (next_value, 0.0),
-                    (next_value + arrow_width, 0.28),
-                    (cumulative, 0.28),
-                ]
-            polygons.append(
+            point_name = (
+                f"time={context[time_column]}"
+                if time_column is not None
+                else f"point {point_index + 1}"
+            )
+            y_ticks.append((center_y, f"{point_name} | {point_label}"))
+            row_values = (
+                self._shap_values.filter(pl.col("row_index") == row_index)
+                .with_columns(pl.col("shap_value").abs().alias("__absolute"))
+                .sort("__absolute", descending=True)
+            )
+            baseline = self._shap_base_values[row_index]
+            output = baseline + row_values.get_column("shap_value").sum()
+            cumulative = baseline
+            baseline_segments.append(
                 {
-                    "x": [point[0] for point in coordinates],
-                    "y": [point[1] for point in coordinates],
-                    "direction": direction,
-                    "feature": row["feature"],
-                    "feature_value": row["feature_value"],
-                    "contribution": contribution,
+                    "x0": baseline,
+                    "y0": center_y - 0.38,
+                    "x1": baseline,
+                    "y1": center_y + 0.38,
                 }
             )
-            labels.append(
-                (
-                    (cumulative + next_value) / 2,
-                    0.42 if contribution >= 0 else -0.42,
-                    (
-                        f"{row['feature']}={row['feature_value']:.3g} "
-                        f"({contribution:+.3f})"
-                    ),
-                )
+            output_points.append(
+                {
+                    "output": output,
+                    "y": center_y,
+                    "point_label": point_label,
+                    "point": point_name,
+                    "row_index": row_index,
+                }
             )
-            cumulative = next_value
+            for contribution_index, row in enumerate(
+                row_values.iter_rows(named=True)
+            ):
+                contribution = row["shap_value"]
+                next_value = cumulative + contribution
+                direction = (
+                    "Increases output"
+                    if contribution >= 0
+                    else "Decreases output"
+                )
+                arrow_width = min(
+                    abs(contribution) * 0.3,
+                    max(abs(output - baseline), 0.01) * 0.04,
+                )
+                arrow_y = 0.28
+                arrow_tip = center_y
+                if contribution >= 0:
+                    coordinates = [
+                        (cumulative, center_y - arrow_y),
+                        (next_value - arrow_width, center_y - arrow_y),
+                        (next_value, arrow_tip),
+                        (next_value - arrow_width, center_y + arrow_y),
+                        (cumulative, center_y + arrow_y),
+                    ]
+                else:
+                    coordinates = [
+                        (cumulative, center_y - arrow_y),
+                        (next_value + arrow_width, center_y - arrow_y),
+                        (next_value, arrow_tip),
+                        (next_value + arrow_width, center_y + arrow_y),
+                        (cumulative, center_y + arrow_y),
+                    ]
+                polygons.append(
+                    {
+                        "x": [point[0] for point in coordinates],
+                        "y": [point[1] for point in coordinates],
+                        "direction": direction,
+                        "feature": row["feature"],
+                        "feature_value": row["feature_value"],
+                        "contribution": contribution,
+                        "point_label": point_label,
+                        "point": point_name,
+                        "row_index": row_index,
+                    }
+                )
+                if row_count == 1 and contribution_index < 12:
+                    label_level = 0.40 + 0.16 * (contribution_index % 2)
+                    labels.append(
+                        (
+                            (cumulative + next_value) / 2,
+                            center_y
+                            + (
+                                label_level
+                                if contribution >= 0
+                                else -label_level
+                            ),
+                            (
+                                f"{row['feature']}={row['feature_value']:.3g} "
+                                f"({contribution:+.3f})"
+                            ),
+                        )
+                    )
+                cumulative = next_value
+        output_range = self._shap_force_range(row_indices)
+        track_value = self.shap_waterfall_track
+        plot_height = max(380, min(1200, 70 * row_count + 150))
         force = hv.Polygons(
             polygons,
-            vdims=["direction", "feature", "feature_value", "contribution"],
+            vdims=[
+                "direction",
+                "feature",
+                "feature_value",
+                "contribution",
+                "point_label",
+                "point",
+                "row_index",
+            ],
         ).opts(
             color="direction",
             cmap={
                 "Increases output": "#f04b4c",
                 "Decreases output": "#3b8ed0",
             },
-            height=330,
+            height=plot_height,
+            responsive=True,
             show_legend=True,
-            tools=["hover"],
+            tools=["hover", "xwheel_zoom", "xpan", "reset"],
             xaxis="bottom",
-            yaxis=None,
-            ylim=(-0.85, 0.85),
+            yticks=y_ticks,
+            xlim=output_range,
+            ylim=(-0.7, max(row_count - 0.3, 0.7)),
             xlabel="Model output",
+            ylabel="Track measurements and labels",
             title=(
-                f"Row {row_index}: base value {baseline:.3f} "
-                f"→ prediction {output:.3f}"
+                f"Track {track_value}: {row_count} individual "
+                f"measurement{'s' if row_count != 1 else ''}"
             ),
         )
-        value_labels = hv.Labels(
-            labels,
-            kdims=["x", "y"],
-            vdims=["text"],
+        baseline_lines = hv.Segments(
+            baseline_segments,
+            kdims=["x0", "y0", "x1", "y1"],
         ).opts(
-            text_font_size="8pt",
-            text_color="black",
-            text_align="center",
-        )
-        baseline_line = hv.VLine(baseline).opts(
             color="#666666",
             line_dash="dashed",
             line_width=1,
         )
-        output_line = hv.VLine(output).opts(
-            color="black",
-            line_width=2,
+        palette = ["#f6c85f", "#6baed6", "#74c476", "#b07aa1", "#ff9da7"]
+        marker_overlay = hv.Overlay()
+        for label_index, point_label in enumerate(
+            dict.fromkeys(point["point_label"] for point in output_points)
+        ):
+            marker_overlay *= hv.Scatter(
+                [
+                    point
+                    for point in output_points
+                    if point["point_label"] == point_label
+                ],
+                kdims=["output"],
+                vdims=["y", "point", "row_index"],
+                label=f"label: {point_label}",
+            ).opts(
+                color=palette[label_index % len(palette)],
+                marker="diamond",
+                size=9,
+                tools=["hover"],
+            )
+        overlay = force * baseline_lines * marker_overlay
+        if labels:
+            overlay *= hv.Labels(
+                labels,
+                kdims=["x", "y"],
+                vdims=["text"],
+            ).opts(
+                text_font_size="8pt",
+                text_color="black",
+                text_align="center",
+            )
+        return overlay
+
+    @param.depends("shap_waterfall_row", "shap_waterfall_track")
+    def shap_waterfall(self):
+        if self._shap_values.is_empty() or not self._shap_base_values:
+            return pn.pane.Markdown("Run SHAP to create a force plot.")
+        track_column = self.state.track_id_col
+        selected_context = self._shap_row_context.filter(
+            pl.col(track_column) == self.shap_waterfall_track
+        ).sort("row_index")
+        if selected_context.is_empty():
+            return pn.pane.Markdown("No analyzed points found for this track.")
+
+        point_cards = []
+        for point_number, context in enumerate(
+            selected_context.iter_rows(named=True),
+            start=1,
+        ):
+            row_index = context["row_index"]
+            row_values = (
+                self._shap_values.filter(pl.col("row_index") == row_index)
+                .with_columns(pl.col("shap_value").abs().alias("__absolute"))
+                .sort("__absolute", descending=True)
+            )
+            baseline = self._shap_base_values[row_index]
+            output = baseline + row_values.get_column("shap_value").sum()
+            cumulative = baseline
+            polygons = []
+            feature_labels = []
+            for feature_index, row in enumerate(
+                row_values.iter_rows(named=True)
+            ):
+                contribution = row["shap_value"]
+                next_value = cumulative + contribution
+                direction = (
+                    "Increases output"
+                    if contribution >= 0
+                    else "Decreases output"
+                )
+                arrow_width = min(
+                    abs(contribution) * 0.3,
+                    max(abs(output - baseline), 0.01) * 0.04,
+                )
+                tip_base = (
+                    next_value - arrow_width
+                    if contribution >= 0
+                    else next_value + arrow_width
+                )
+                coordinates = [
+                    (cumulative, -0.24),
+                    (tip_base, -0.24),
+                    (next_value, 0.0),
+                    (tip_base, 0.24),
+                    (cumulative, 0.24),
+                ]
+                polygons.append(
+                    {
+                        "x": [point[0] for point in coordinates],
+                        "y": [point[1] for point in coordinates],
+                        "direction": direction,
+                        "feature": row["feature"],
+                        "feature_value": row["feature_value"],
+                        "contribution": contribution,
+                    }
+                )
+                label_y = (0.43 + 0.18 * (feature_index % 3)) * (
+                    1 if feature_index % 2 == 0 else -1
+                )
+                feature_labels.append(
+                    (
+                        (cumulative + next_value) / 2,
+                        label_y,
+                        f"{row['feature']} ({contribution:+.3g})",
+                    )
+                )
+                cumulative = next_value
+
+            local_range = self._shap_force_range([row_index])
+            force = hv.Polygons(
+                polygons,
+                vdims=[
+                    "direction",
+                    "feature",
+                    "feature_value",
+                    "contribution",
+                ],
+            ).opts(
+                color="direction",
+                cmap={
+                    "Increases output": "#f04b4c",
+                    "Decreases output": "#3b8ed0",
+                },
+                height=300,
+                responsive=True,
+                show_legend=True,
+                tools=["hover", "xwheel_zoom", "xpan", "reset"],
+                xlim=local_range,
+                ylim=(-1.05, 1.05),
+                xaxis="bottom",
+                yaxis=None,
+                xlabel="Model output",
+            )
+            labels = hv.Labels(
+                feature_labels,
+                kdims=["x", "y"],
+                vdims=["text"],
+            ).opts(
+                text_font_size="9pt",
+                text_color="#f2f2f2",
+                text_align="center",
+            )
+            reference_lines = (
+                hv.VLine(baseline).opts(
+                    color="#aaaaaa",
+                    line_dash="dashed",
+                    line_width=1,
+                )
+                * hv.VLine(output).opts(color="#f6c85f", line_width=2)
+            )
+            time_value = next(
+                (
+                    context[column]
+                    for column in ("time", "timestamp")
+                    if column in selected_context.columns
+                ),
+                None,
+            )
+            label_value = (
+                context.get(self.label_column)
+                if self.label_column in selected_context.columns
+                else None
+            )
+            details = [f"Point {point_number}"]
+            if time_value is not None:
+                details.append(f"time={time_value}")
+            if label_value is not None:
+                details.append(f"{self.label_column}={label_value}")
+            details.extend(
+                [f"base={baseline:.4g}", f"prediction={output:.4g}"]
+            )
+            point_cards.append(
+                pn.Card(
+                    pn.pane.HoloViews(
+                        (force * labels * reference_lines).opts(
+                            shared_axes=False
+                        ),
+                        sizing_mode="stretch_width",
+                    ),
+                    title=" | ".join(details),
+                    sizing_mode="stretch_width",
+                    collapsed=False,
+                )
+            )
+        return pn.Column(
+            pn.pane.Markdown(
+                f"**Track {self.shap_waterfall_track}: "
+                f"{len(point_cards)} individually scaled points.** "
+                "Red increases the model output; blue decreases it."
+            ),
+            *point_cards,
+            sizing_mode="stretch_width",
         )
-        markers = hv.Labels(
-            [
-                (baseline, 0.72, f"base {baseline:.3f}"),
-                (output, 0.72, f"prediction {output:.3f}"),
-            ],
-            kdims=["x", "y"],
-            vdims=["text"],
-        ).opts(text_font_size="9pt", text_color="black")
-        return force * value_labels * baseline_line * output_line * markers
 
     @param.depends("model_source")
     def model_configuration(self):
@@ -667,6 +1011,21 @@ class FeatureAnalysisPanel(AnalysisComponent):
         return pn.widgets.Select.from_param(
             self.param.model,
             name="Provided model",
+            sizing_mode="stretch_width",
+        )
+
+    @param.depends("methods", "model_source")
+    def model_options(self):
+        if not ({"SHAP", "Permutation importance"} & set(self.methods)):
+            return pn.Spacer(height=0)
+        return pn.Column(
+            pn.widgets.RadioButtonGroup.from_param(
+                self.param.model_source,
+                name="SHAP / permutation model source",
+                button_type="primary",
+                sizing_mode="stretch_width",
+            ),
+            self.model_configuration,
             sizing_mode="stretch_width",
         )
 
@@ -837,13 +1196,7 @@ class FeatureAnalysisPanel(AnalysisComponent):
                 sizing_mode="stretch_width",
             ),
             self.shap_options,
-            pn.widgets.RadioButtonGroup.from_param(
-                self.param.model_source,
-                name="SHAP / permutation model source",
-                button_type="primary",
-                sizing_mode="stretch_width",
-            ),
-            self.model_configuration,
+            self.model_options,
             pn.widgets.IntInput.from_param(
                 self.param.sample_size,
                 name="Maximum sampled rows",

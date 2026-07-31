@@ -34,6 +34,19 @@ def test_dashboard_adds_rules_and_downloads_nested_candidate_config():
     )
     assert dashboard.first_confirmation_distributions() is not None
     assert dashboard.first_confirmation_details() is not None
+    assert dashboard.first_confirmation_summary() is not None
+    default_rows = dashboard._path_frame(dashboard._default_path_rows())
+    candidate_rows = dashboard._path_frame(dashboard._candidate_path_rows())
+    assert set(default_rows.get_column("path")) == {
+        "quality_path",
+        "limb_path",
+    }
+    assert set(candidate_rows.get_column("path")) == {
+        "quality_path",
+        "candidate",
+        "second_candidate",
+    }
+    assert dashboard.path_comparison_overview() is not None
     assert dashboard.path_summary() is not None
     changed_data = dashboard.changed_track_data()
     assert set(changed_data["confirmation_logic"]) <= {"Default", "Candidate"}
@@ -96,6 +109,45 @@ def test_dashboard_identifies_tracks_lost_by_candidate_path_selection():
     lost_data = dashboard.changed_track_data()
     assert set(lost_data["confirmation_logic"]) == {"Default"}
     assert set(lost_data["confirmation_change"]) == {"Lost"}
+
+
+def test_dashboard_selects_enabled_baseline_and_candidate_paths_independently():
+    dashboard = TrackConfirmationDashboard(
+        make_example_data(tracks=12, points_per_track=5),
+        make_example_confirmation_config(),
+    )
+    dashboard.enabled_baseline_paths = []
+
+    comparison = dashboard._comparison()
+
+    assert comparison.metrics["default_confirmed_tracks"] == 0
+    assert comparison.metrics["candidate_confirmed_tracks"] > 0
+    candidate_rows = dashboard._path_frame(dashboard._candidate_path_rows())
+    assert set(candidate_rows.get_column("change")) == {"Added"}
+
+
+def test_dashboard_shows_only_changed_range_for_same_named_path():
+    dashboard = TrackConfirmationDashboard(
+        make_example_data(tracks=12, points_per_track=5),
+        make_example_confirmation_config(),
+    )
+    dashboard.path_name = "quality_path"
+    dashboard.feature = "snr"
+    dashboard.minimum = 25.0
+    dashboard._add_rule()
+
+    quality_rows = [
+        row
+        for row in dashboard._candidate_path_rows()
+        if row["path"] == "quality_path"
+    ]
+
+    assert len(quality_rows) == 2
+    changed = [row for row in quality_rows if row["change"] == "Modified"]
+    assert len(changed) == 1
+    assert changed[0]["feature"] == "snr"
+    assert changed[0]["difference"] == "min: 20.0 → 25.0"
+    assert dashboard._comparison().candidate_path_columns == ("quality_path",)
 
 
 def test_dashboard_adds_and_restores_registered_ml_paths():
@@ -173,4 +225,3 @@ def test_dashboard_uses_provided_ml_path_as_existing_confirmation_logic():
         "limb_path",
         "current_ml_quality",
     )
-
